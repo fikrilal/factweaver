@@ -14,6 +14,7 @@ This repo is designed to be public **without** publishing your private chat hist
 ## Docs
 
 - Design proposal: `docs/memory-extraction-pipeline.md`
+- Engineering design (implementation decisions): `docs/engineering-design.md`
 - Prompt templates:
   - `docs/prompts/claims-map-template.md`
   - `docs/prompts/claims-reduce-template.md`
@@ -22,6 +23,7 @@ This repo is designed to be public **without** publishing your private chat hist
 ## Tools
 
 - Token counting: `tools/count_tokens.py`
+- WSL → Windows wrappers (optional): `tools/win`, `tools/gitw`
 
 ### Token count quickstart
 
@@ -31,4 +33,3 @@ python3 -m venv .venv
 .venv/bin/python -m pip install tiktoken
 .venv/bin/python tools/count_tokens.py conversations.json
 ```
-

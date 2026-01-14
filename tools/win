@@ -8,13 +8,13 @@
 # - This wrapper makes **Windows** the toolchain source-of-truth while the agent runs in WSL.
 #
 # Usage:
-# - `bash tools/agent/win npm ci`
-# - `bash tools/agent/win npm run test:e2e`
-# - `bash tools/agent/win docker compose up -d`
+# - `bash tools/win npm ci`
+# - `bash tools/win npm run test:e2e`
+# - `bash tools/win docker compose up -d`
 #
 # Notes:
 # - Commands execute from the repo root in a Windows PowerShell process.
-# - Prefer `bash tools/agent/doctor` to preflight required tooling (Docker Desktop, Node, npm, .env).
+# - Prefer a preflight/doctor script before long runs (Docker Desktop, Node, npm, .env).
 set -euo pipefail
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
