@@ -32,15 +32,54 @@ Recommended local checks before pushing:
 
 ## 3) Repo layout (working + public)
 
+### 3.1 Current (bootstrap)
+
 Public (committed):
 - `docs/` design docs, prompt templates, output skeletons
-- `tools/` scripts and wrappers (no secrets)
+- `tools/` small scripts and wrappers (no secrets)
 
 Local-only (ignored):
 - `conversations.json` / `shared_conversations.json` (or `data/` if you prefer)
 - `messages.jsonl` / `messages_view.jsonl`
 - `chunks/` / `claims/` / `out/`
 - `facts.db` (SQLite canonical store), optional `facts.jsonl` export
+
+### 3.2 Target structure (before the repo grows)
+
+Goal: keep “core logic” reusable, keep “CLI tools” thin, and isolate Windows/agent bridge tooling so it doesn’t contaminate the pipeline design.
+
+Recommended layout:
+- `factweaver/` (core Python package)
+  - `io_export/` stream parse exports → linear message list
+  - `normalize/` raw transcript → `messages.jsonl`
+  - `view/` redaction + trimming → `messages_view.jsonl`
+  - `chunk/` token estimation + chunk manifest
+  - `llm/` provider interface, prompt rendering, JSONL validation
+  - `store/` SQLite schema + merge/dedupe + conflicts
+  - `render/` Markdown generation from `facts.db`
+- `tools/` (entrypoints and operational scripts)
+  - `tools/pipeline/` pipeline CLIs (export/view/chunk/extract/merge/render)
+  - `tools/bridge/` WSL→Windows bridge wrappers (git/node/npm/etc.)
+  - `tools/dev/` safety + diagnostics (token counts, ignore checks, doctor)
+- `docs/`
+  - `docs/architecture/` stable architecture + diagrams
+  - `docs/adrs/` decision records (one decision per file)
+  - keep `docs/prompts/` and `docs/output-skeletons/`
+
+Compatibility guideline:
+- Keep top-level `tools/win` and `tools/gitw` as stable entrypoints; if we later move implementations into `tools/bridge/`, the top-level scripts should delegate rather than break paths.
+
+### 3.3 Local artifacts: single run directory
+
+To reduce “oops I staged the wrong file”, prefer a single ignored run root (e.g., `work/`):
+- `work/<run-id>/messages.jsonl`
+- `work/<run-id>/messages_view.jsonl`
+- `work/<run-id>/chunks/` (+ `manifest.json`)
+- `work/<run-id>/claims/`
+- `work/<run-id>/facts.db`
+- `work/<run-id>/out/`
+
+This keeps reruns and comparisons easy (multiple runs can coexist) and makes ignore rules simpler.
 
 ## 4) Architecture overview
 
@@ -100,16 +139,21 @@ Fact identity:
 
 The pipeline is intentionally decomposed into small, composable tools. The design targets idempotent steps with explicit inputs/outputs.
 
-Planned scripts (Phase 1–3):
-- `tools/export_messages.py`: `conversations.json` → `messages.jsonl`
-- `tools/build_view.py`: `messages.jsonl` → `messages_view.jsonl` (redaction + trimming)
-- `tools/chunk_messages.py`: `messages_view.jsonl` → `chunks/` (+ manifest)
-- `tools/extract_claims.py`: `chunks/` → `claims/` (LLM map step; provider/driver abstracted)
-- `tools/merge_claims.py`: `claims/` → `facts.db` (dedupe + conflicts + evidence)
-- `tools/render_md.py`: `facts.db` → `out/me/*.md` + `out/review.md`
+Planned scripts (Phase 1–3), as thin CLIs over `factweaver/*`:
+- `tools/pipeline/export_messages.py`: export → `messages.jsonl`
+- `tools/pipeline/build_view.py`: `messages.jsonl` → `messages_view.jsonl` (redaction + trimming)
+- `tools/pipeline/chunk_messages.py`: `messages_view.jsonl` → `chunks/` (+ manifest)
+- `tools/pipeline/extract_claims.py`: `chunks/` → `claims/` (LLM map; provider/driver abstracted)
+- `tools/pipeline/merge_claims.py`: `claims/` → `facts.db` (dedupe + conflicts + evidence)
+- `tools/pipeline/render_md.py`: `facts.db` → `out/me/*.md` + `out/review.md`
 
 Existing:
-- `tools/count_tokens.py`: token counts for large inputs using `tiktoken`
+- `tools/count_tokens.py`: token counts for large inputs using `tiktoken` (likely moves to `tools/dev/` later)
+
+CLI conventions (recommendation):
+- Explicit input/output paths (no implicit CWD “magic”).
+- A `--run-dir work/<run-id>` option that controls where artifacts are written.
+- Atomic writes for outputs (write temp → rename) + per-step manifests/hashes.
 
 Design principle:
 - Each tool writes outputs atomically (temp file → rename) and records a manifest/hash so reruns skip unchanged units.
@@ -125,8 +169,9 @@ Current pattern (already in repo):
 - `tools/gitw` is a convenience wrapper: `bash tools/gitw <git args...>`.
 
 Future expansion (when needed):
-- Add wrappers for other Windows-native commands (e.g., `node`, `npm`, `python`), keeping the calling convention consistent.
-- Add a `tools/doctor` preflight to validate required tooling and auth state before running long jobs.
+- Group wrappers under `tools/bridge/` (e.g., `nodew`, `npmw`, `dockerw`) while keeping `tools/win`/`tools/gitw` as stable entrypoints.
+- Keep wrapper behavior explicit: set repo root, pass args through verbatim, and exit with child status.
+- Add a `tools/dev/doctor` preflight to validate required tooling/auth before long jobs (and to keep failures fast).
 
 ## 8) Milestones (implementation order)
 
@@ -151,4 +196,5 @@ Phase 4 (hardening):
 - LLM provider interface: which model(s), how to store run metadata, and retry semantics.
 - Redaction scope: redact in Markdown only vs also in the canonical store.
 - Review workflow: auto-accept high-confidence user-asserted facts vs manual approval gate.
-
+- Artifact layout: single `work/<run-id>` directory vs root-level artifact files.
+- Execution mode: agent/manual (prompt-in/paste-out) vs API-driven automation.

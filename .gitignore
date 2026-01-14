@@ -16,6 +16,7 @@ out/
 facts.db
 facts.jsonl
 *.sqlite
+work/
 
 # Local env
 .env
