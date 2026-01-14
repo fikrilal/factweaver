@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Local ChatGPT exports / personal data (DO NOT COMMIT)
+conversations.json
+shared_conversations.json
+data/
+
+# Generated pipeline artifacts (DO NOT COMMIT)
+messages.jsonl
+messages_view.jsonl
+chunks/
+claims/
+out/
+facts.db
+facts.jsonl
+*.sqlite
+
+# Local env
+.env
+.env.*
