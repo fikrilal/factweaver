@@ -130,7 +130,8 @@ Minimum tables (subject to iteration):
 - `claims_raw(chunk_id TEXT, claim_json TEXT, inserted_at REAL)`
 - `facts(fact_id TEXT PRIMARY KEY, category TEXT, fact_text TEXT, stability TEXT, first_seen_ts REAL, last_seen_ts REAL, confidence_max REAL, status TEXT)`
 - `evidence(fact_id TEXT, conv_id TEXT, message_id TEXT, ts REAL, role TEXT, quote TEXT, quote_hash TEXT)`
-- `conflicts(fact_id_a TEXT, fact_id_b TEXT, conflict_type TEXT, reason TEXT)`
+- `review_flags(fact_id TEXT, flag_type TEXT, detail TEXT)` (auto-detected “needs review” signals)
+- `fact_reviews(fact_id TEXT, action TEXT, previous_status TEXT, new_status TEXT, reason TEXT, decided_at REAL)` (human audit log)
 
 Fact identity:
 - `fact_id = sha256(category + \"\\n\" + normalized_fact_text)` (normalize by trimming + collapsing whitespace; keep deterministic).
@@ -146,6 +147,7 @@ Planned scripts (Phase 1–3), as thin CLIs over `factweaver/*`:
 - `tools/pipeline/extract_claims.py`: `chunks/` → `claims/` (LLM map; provider/driver abstracted)
 - `tools/pipeline/merge_claims.py`: `claims/` → `facts.db` (dedupe + conflicts + evidence)
 - `tools/pipeline/render_md.py`: `facts.db` → `out/me/*.md` + `out/review.md`
+- `tools/pipeline/curate_facts.py`: apply human accept/reject decisions to `facts.db` (audit log), then rerender
 
 Existing:
 - `tools/count_tokens.py`: token counts for large inputs using `tiktoken` (likely moves to `tools/dev/` later)
