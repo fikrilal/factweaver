@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  tools/win/gitw [--no-stdin] [git-args...]
+
+Runs Windows git from WSL via PowerShell (repo root).
+
+Options:
+  --no-stdin   Redirect stdin from /dev/null (non-interactive safe).
+
+Examples:
+  tools/win/gitw status
+  tools/win/gitw --no-stdin add -A
+  tools/win/gitw --no-stdin commit -m "chore: tighten color guardrails"
+  tools/win/gitw --no-stdin push
+EOF
+}
+
+no_stdin=0
+if [[ "${1:-}" == "--no-stdin" ]]; then
+  no_stdin=1
+  shift
+fi
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+win="$script_dir/win"
+if [[ ! -x "$win" ]]; then
+  echo "ERROR: $win not found or not executable." >&2
+  exit 1
+fi
+
+if [[ $no_stdin -eq 1 ]]; then
+  exec </dev/null "$win" git "$@"
+fi
+exec "$win" git "$@"

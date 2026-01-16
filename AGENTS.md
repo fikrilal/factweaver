@@ -5,6 +5,8 @@ FactWeaver is an **agent-in-the-loop** pipeline: tools manage artifacts; the age
 ## Project Structure
 
 - `docs/`: pipeline + engineering design docs, prompt templates, output skeletons.
+- `docs/agent/`: required agent loop, guardrails, taxonomy, checklist.
+- `manual/agent/`: short runbook entrypoint for operators/agents.
 - `tools/pipeline/`: deterministic CLIs (export, view, chunk, validate, merge, render, status).
 - `tools/dev/`: safety/diagnostics (e.g., `doctor.py`).
 - Local-only artifacts (gitignored): `conversations.json`, `shared_conversations.json`, `work/`, `facts.db`, `chunks/`, `claims/`, `out/`.
@@ -21,6 +23,18 @@ Typical run (agent-first):
 - `python3 tools/pipeline/merge_claims.py --run-dir work/<run-id>`
 - `python3 tools/pipeline/render_md.py --run-dir work/<run-id> --overwrite`
 - `python3 tools/pipeline/status.py --run-dir work/<run-id>`
+
+## Agent Loop (Required)
+
+- Canonical loop: `docs/agent/loop.md` (definition of done + per-chunk commands).
+- Guardrails: `docs/agent/guardrails.md` (privacy, injection safety, evidence rules).
+- Checklist: `docs/agent/checklist.md`
+- Taxonomy: `docs/agent/taxonomy.md`
+
+Key policies:
+- A chunk is “done” only after `merge_claims.py` records it in `facts.db.chunk_progress` (even if the claims file is empty).
+- Interests use option B: `category="preferences.interests"` with `value="<interest label>"`; `accepted` requires 3+ distinct user occurrences in evidence.
+- Latest-only categories: `identity.name`, `identity.handle`, `identity.role`, `identity.company` (older values become `superseded`).
 
 Safety preflight:
 - `python3 tools/dev/doctor.py --verbose`

@@ -41,14 +41,16 @@ Each line in `claims/claims_chunk_XXXX.jsonl` is a JSON object with:
 - `evidence`: array of `{ role, quote, conv_id, message_id, ts }` (short, verbatim; redact secrets)
 - `derived_from`: `"user"` | `"mixed"` | `"assistant"`
   - `"mixed"` is allowed for inference (e.g., inferred interest) as long as evidence is present.
+Optional:
+- `value`: string (structured value for stable de-dupe; required for `preferences.interests`)
 
 ## 4) Taxonomy (recommended)
 
 Use specific categories so “single-valued” items can be kept latest-only:
-- `identity.name`, `identity.handle`
+- `identity.name`, `identity.handle`, `identity.role`, `identity.company`
 - `preferences.workflow.*` (e.g., `preferences.workflow.commit_policy`)
 - `preferences.tools.*` (e.g., `preferences.tools.git`, `preferences.tools.editor`)
-- `preferences.interests.*` (e.g., `preferences.interests.ai_news`)
+- `preferences.interests` (option B; interest label stored in `value`)
 - `projects.*` (repo, system, pipeline, stack)
 - `constraints.*` (hard requirements / do-not)
 - `events.major.*` (major life/work events)
@@ -74,7 +76,8 @@ Minimum tables (simplified):
 - `chunk_progress` (chunk_id + chunk_sha + done_at + claims_count + note)
 
 Latest-only policy:
-- for “single-valued” categories, keep only the newest accepted fact (by evidence timestamp); older accepted facts should be demoted (e.g., marked rejected/superseded) rather than kept as competing truths.
+- for “single-valued” categories, keep only the newest accepted fact (by evidence timestamp); older accepted facts should be marked `superseded` rather than kept as competing truths.
+- single-valued categories: `identity.name`, `identity.handle`, `identity.role`, `identity.company`
 
 ## 6) Rendering
 

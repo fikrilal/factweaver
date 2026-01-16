@@ -18,6 +18,8 @@ Optional preflight:
 
 - Pipeline overview: `docs/memory-extraction-pipeline.md`
 - Engineering design: `docs/engineering-design.md`
+- Agent runbook: `manual/agent/README.md`
+- Agent loop + guardrails: `docs/agent/`
 - Prompt template (agent uses per chunk): `docs/prompts/claims-map-template.md`
 - Output skeletons: `docs/output-skeletons/`
 
@@ -48,6 +50,7 @@ python3 tools/pipeline/status.py --run-dir "$RUN"
 Notes:
 - A chunk is considered **done** when it has been applied to `facts.db` (tracked in a progress table), even if it produced no useful memory.
 - Rendered “final” views (`out/me/*.md`) contain **accepted** facts only. `out/review.md` is the queue for `needs_review`.
+- Latest-only categories are enforced by the merge step: `identity.name`, `identity.handle`, `identity.role`, `identity.company` (older values become `superseded`).
 
 ### Token count quickstart
 

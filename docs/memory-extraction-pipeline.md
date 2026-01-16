@@ -66,6 +66,10 @@ Key rules:
   - Interest threshold: **3+ occurrences ever**. Before threshold, keep `status="needs_review"` or defer.
 - Major events only; skip minor day-to-day mood statements unless they recur as a stable pattern.
 - Conflicts: keep **only the latest** version for “single-valued” attributes (agent should prefer newer evidence).
+  - Latest-only categories: `identity.name`, `identity.handle`, `identity.role`, `identity.company`.
+
+Interest storage (option B):
+- Use `category="preferences.interests"` with `value="<interest label>"` (e.g., `"AI news"`).
 
 ## 5) Review workflow
 

@@ -25,7 +25,8 @@ Major events:
 - Include only major life/work events. Skip minor day-to-day mood statements unless they recur as a stable pattern.
 
 Latest-only (single-valued attributes):
-- For attributes like a name/role/preferred tool where only one can be current, prefer the newest evidence and avoid emitting older competing facts.
+- For categories where only one value should be current, prefer the newest evidence and avoid emitting older competing facts.
+- Latest-only categories: `identity.name`, `identity.handle`, `identity.role`, `identity.company`.
 
 ## User prompt (template)
 
@@ -53,16 +54,21 @@ Required:
 - `derived_from`: `"user"` | `"mixed"` | `"assistant"`
 
 Optional:
+- `value`: string (structured value for stable de-dupe; required for `preferences.interests`)
 - `tags`: string[]
 - `notes`: string
 
 ### Category taxonomy (recommended)
-- `identity.name`, `identity.handle`
-- `preferences.workflow.*`, `preferences.tools.*`, `preferences.interests.*`
+- `identity.name`, `identity.handle`, `identity.role`, `identity.company`
+- `preferences.workflow.*`, `preferences.tools.*`, `preferences.interests`
 - `projects.*`
 - `constraints.*`
 - `events.major.*`
 - `goals.transient`
+
+Interest storage (option B):
+- Use `category="preferences.interests"` and set `value` to the interest label (e.g., `"AI news"`).
+- If `status="accepted"`, include evidence for **3+ distinct user occurrences** (different `message_id`s). Otherwise use `status="needs_review"`.
 
 ### Transcript chunk (JSONL)
 {{CHUNK_JSONL_HERE}}
