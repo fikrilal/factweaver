@@ -183,6 +183,14 @@ def validate_claim(
             "Missing/invalid `stability` (expected 'stable' or 'transient').",
         )
 
+    status = _require_str(claim, "status")
+    if status is None or status not in {"accepted", "needs_review"}:
+        add(
+            "error",
+            "schema.status",
+            "Missing/invalid `status` (expected 'accepted' or 'needs_review').",
+        )
+
     confidence = claim.get("confidence")
     if not isinstance(confidence, (int, float)):
         add("error", "schema.confidence", "Missing/invalid `confidence` (expected number in [0,1]).")
@@ -230,15 +238,20 @@ def validate_claim(
     if notes is not None and not isinstance(notes, str):
         add("error", "schema.notes", "Invalid `notes` (expected string).")
 
+    value = claim.get("value")
+    value_str: str | None = None
+    if value is not None:
+        if isinstance(value, str) and value.strip():
+            value_str = value.strip()
+        else:
+            add("error", "schema.value", "Invalid `value` (expected non-empty string when present).")
+
     # Grounding policy.
     has_user_evidence = False
-    has_assistant_evidence = False
     for idx, ev in enumerate(evidence_items):
         role = ev.get("role")
         if role == "user":
             has_user_evidence = True
-        if role == "assistant":
-            has_assistant_evidence = True
 
         if role not in {"user", "assistant"}:
             add("error", "evidence.role", f"Evidence[{idx}].role must be 'user' or 'assistant'.")
@@ -270,19 +283,38 @@ def validate_claim(
     if derived_from in {"user", "mixed"} and not has_user_evidence:
         add("error", "grounding.user_evidence", "`derived_from` requires at least one user evidence quote.")
 
-    if derived_from == "assistant" and confidence_f is not None and confidence_f > 0.5:
-        add("error", "grounding.assistant_confidence", "`derived_from:'assistant'` requires confidence <= 0.5.")
-
-    if derived_from == "mixed" and not has_assistant_evidence:
-        warnings.append(
-            Issue(
-                level="warning",
-                code="grounding.mixed_missing_assistant_evidence",
-                file=file,
-                line=line_no,
-                message="`derived_from:'mixed'` but no assistant evidence present (is this actually 'user'?).",
-            )
+    # Agent-in-the-loop: assistant-derived items should not be accepted automatically.
+    if derived_from == "assistant" and status == "accepted":
+        add(
+            "error",
+            "grounding.assistant_status",
+            "`derived_from:'assistant'` must use `status:'needs_review'`.",
         )
+
+    # Interest policy (option B): single category + value label.
+    if category == "preferences.interests":
+        if value_str is None:
+            add(
+                "error",
+                "schema.value.required",
+                "`value` is required for `category:'preferences.interests'` (interest label).",
+            )
+        if status == "accepted":
+            # Must show evidence of >=3 distinct user occurrences.
+            user_occurrences: set[tuple[str, str]] = set()
+            for ev in evidence_items:
+                if ev.get("role") != "user":
+                    continue
+                conv_id = ev.get("conv_id")
+                message_id = ev.get("message_id")
+                if isinstance(conv_id, str) and conv_id.strip() and isinstance(message_id, str) and message_id.strip():
+                    user_occurrences.add((conv_id, message_id))
+            if len(user_occurrences) < 3:
+                add(
+                    "error",
+                    "interest.threshold",
+                    "Accepted interests require evidence for 3+ distinct user occurrences; otherwise use `needs_review`.",
+                )
 
     # Safety scan for secrets/PII in fact/notes.
     if isinstance(fact, str):
@@ -543,4 +575,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

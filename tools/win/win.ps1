@@ -1,5 +1,5 @@
 <#
-Agent-only: invoked by `tools/agent/win` (bash) to run Windows commands from a WSL agent context.
+Agent-only: invoked by `tools/win/win` (bash) to run Windows commands from a WSL agent context.
 
 Contract:
 - Sets working directory to repo root (Windows path)

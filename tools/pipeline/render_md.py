@@ -633,6 +633,8 @@ def main(argv: list[str]) -> int:
                 return args.include_needs_review
             if status == "rejected":
                 return args.include_rejected
+            if status == "superseded":
+                return args.include_rejected
             # Unknown future statuses: treat as needs_review-like.
             return args.include_needs_review
 

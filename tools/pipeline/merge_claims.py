@@ -26,6 +26,14 @@ def _sha256_str(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _sha256_path(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _canonical_json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -34,6 +42,72 @@ def _normalize_fact_text(text: str) -> str:
     # Conservative normalization: collapse whitespace and casefold for stable hashing.
     collapsed = re.sub(r"\s+", " ", text.strip())
     return collapsed.casefold()
+
+
+LATEST_ONLY_CATEGORIES: set[str] = {
+    "identity.name",
+    "identity.handle",
+    "identity.role",
+    "identity.company",
+}
+
+
+def _enforce_latest_only_category(cur: sqlite3.Cursor, *, category: str) -> int:
+    """
+    Enforce "latest-only" semantics within a category by demoting competing facts to `superseded`.
+
+    Winner selection:
+    - If any `accepted` fact exists, pick the newest accepted by last_seen_ts.
+    - Else, pick the newest needs_review by last_seen_ts.
+    - Tie-break: higher confidence_max, then fact_id (deterministic).
+    """
+    rows = cur.execute(
+        """
+        SELECT fact_id, last_seen_ts, confidence_max, status
+        FROM facts
+        WHERE category=? AND status IN ('accepted', 'needs_review')
+        """,
+        (category,),
+    ).fetchall()
+
+    if len(rows) <= 1:
+        return 0
+
+    has_accepted = any(r[3] == "accepted" for r in rows)
+    primary = "accepted" if has_accepted else "needs_review"
+
+    def key(r: tuple[Any, Any, Any, Any]) -> tuple[float, float, str]:
+        ts = r[1]
+        conf = r[2]
+        ts_f = float(ts) if isinstance(ts, (int, float)) else -1.0
+        conf_f = float(conf) if isinstance(conf, (int, float)) else 0.0
+        fact_id = r[0] if isinstance(r[0], str) else ""
+        return (-ts_f, -conf_f, fact_id)
+
+    candidates = [r for r in rows if r[3] == primary]
+    if not candidates:
+        return 0
+
+    winner = sorted(candidates, key=key)[0]
+    winner_id = winner[0]
+    if not isinstance(winner_id, str) or not winner_id:
+        return 0
+
+    to_demote = [r[0] for r in rows if r[0] != winner_id and isinstance(r[0], str) and r[0]]
+    if not to_demote:
+        return 0
+
+    placeholders = ",".join("?" for _ in to_demote)
+    cur.execute(
+        f"""
+        UPDATE facts
+        SET status='superseded'
+        WHERE fact_id IN ({placeholders})
+          AND status IN ('accepted', 'needs_review')
+        """,
+        to_demote,
+    )
+    return len(to_demote)
 
 
 def _atomic_write_text(path: Path, text: str, *, overwrite: bool) -> None:
@@ -186,6 +260,18 @@ CREATE TABLE IF NOT EXISTS review_flags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_review_flags_fact ON review_flags(fact_id);
+
+CREATE TABLE IF NOT EXISTS chunk_progress (
+  chunk_id TEXT PRIMARY KEY,
+  chunk_sha256 TEXT NOT NULL,
+  claims_path TEXT NOT NULL,
+  claims_sha256 TEXT NOT NULL,
+  claims_objects INTEGER NOT NULL,
+  done_at REAL NOT NULL,
+  note TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_progress_done_at ON chunk_progress(done_at);
 """
 
 
@@ -222,6 +308,31 @@ def _validation_has_errors(report: dict[str, Any]) -> bool:
     return False
 
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _load_final_decision_cutoffs(conn: sqlite3.Connection) -> dict[str, float]:
+    # fact_id -> latest decided_at timestamp for accepted/rejected decisions.
+    rows = conn.execute(
+        """
+        SELECT fact_id, MAX(decided_at) AS decided_at
+        FROM fact_reviews
+        WHERE new_status IN ('accepted', 'rejected')
+        GROUP BY fact_id
+        """
+    ).fetchall()
+    out: dict[str, float] = {}
+    for fact_id, decided_at in rows:
+        if isinstance(fact_id, str) and isinstance(decided_at, (int, float)):
+            out[fact_id] = float(decided_at)
+    return out
+
+
 def discover_claim_files(run_dir: Path) -> list[Path]:
     claims_dir = run_dir / "claims"
     if not claims_dir.is_dir():
@@ -237,42 +348,38 @@ def _chunk_id_from_claim_path(path: Path) -> str | None:
     return m.group(1)
 
 
-def _status_for_claim(
-    *,
-    derived_from: str,
-    stability: str,
-    confidence: float,
-    autoaccept_min_conf: float | None,
-) -> str:
-    if autoaccept_min_conf is None:
-        return "needs_review"
-
-    if derived_from != "user":
-        return "needs_review"
-
-    if confidence < autoaccept_min_conf:
-        return "needs_review"
-
-    # Auto-accept user-asserted stable facts (transient remains reviewable by default).
-    if stability == "stable":
-        return "accepted"
-    return "needs_review"
+def _status_from_claim(claim: dict[str, Any]) -> str:
+    """
+    Agent-first policy:
+    - Agent sets `status` explicitly.
+    - Default to accepted if missing/invalid (validation should catch it, but keep merge robust).
+    """
+    status = claim.get("status")
+    if isinstance(status, str):
+        status = status.strip()
+    else:
+        status = None
+    return status if status in {"accepted", "needs_review"} else "accepted"
 
 
 def merge_claims(
     *,
     conn: sqlite3.Connection,
+    run_dir: Path,
     claim_paths: Iterable[Path],
-    autoaccept_min_conf: float | None,
     exclusive_categories: list[str],
     exclusive_conflict_min_conf: float,
+    final_decision_cutoff_ts: dict[str, float],
     stats: MergeStats,
 ) -> None:
     cur = conn.cursor()
 
     for claim_path in claim_paths:
+        latest_only_seen: set[str] = set()
+        before_objects = stats.claim_objects
         chunk_id = _chunk_id_from_claim_path(claim_path)
         source_path = claim_path.as_posix()
+        claims_sha256 = _sha256_path(claim_path)
 
         with claim_path.open("r", encoding="utf-8") as f:
             for line_no, raw_line in enumerate(f, start=1):
@@ -317,6 +424,10 @@ def merge_claims(
                 confidence = claim.get("confidence")
                 time_obj = claim.get("time")
                 derived_from = claim.get("derived_from")
+                desired_status = _status_from_claim(claim)
+                if derived_from == "assistant" and desired_status == "accepted":
+                    # Validation should have caught this; keep merge robust.
+                    desired_status = "needs_review"
 
                 if not isinstance(category, str) or not category.strip():
                     raise ValueError(f"{source_path}:{line_no}: missing/invalid category")
@@ -332,7 +443,12 @@ def merge_claims(
                 if isinstance(time_obj, dict) and isinstance(time_obj.get("as_of_ts"), (int, float)):
                     as_of_ts = float(time_obj["as_of_ts"])
 
-                normalized = _normalize_fact_text(fact_text)
+                key_text = fact_text
+                value = claim.get("value")
+                if isinstance(value, str) and value.strip():
+                    key_text = value
+
+                normalized = _normalize_fact_text(key_text)
                 fact_id = _sha256_str(category + "\n" + normalized)
 
                 claim_canonical = _canonical_json(claim)
@@ -346,7 +462,8 @@ def merge_claims(
                     """,
                     (claim_id, source_path, line_no, chunk_id, claim_canonical, imported_at),
                 )
-                if cur.rowcount == 1:
+                claim_is_new = cur.rowcount == 1
+                if claim_is_new:
                     stats.claims_raw_inserted += 1
 
                 # Upsert facts.
@@ -354,13 +471,6 @@ def merge_claims(
                     "SELECT fact_text, stability, first_seen_ts, last_seen_ts, confidence_max, status FROM facts WHERE fact_id=?",
                     (fact_id,),
                 ).fetchone()
-
-                desired_status = _status_for_claim(
-                    derived_from=derived_from,
-                    stability=stability,
-                    confidence=float(confidence),
-                    autoaccept_min_conf=autoaccept_min_conf,
-                )
 
                 if row is None:
                     cur.execute(
@@ -404,20 +514,48 @@ def merge_claims(
                     elif not isinstance(existing_fact_text, str) or not existing_fact_text.strip():
                         updated_fact_text = fact_text.strip()
 
-                    # Status is monotonic unless we detect a conflict:
-                    # - never auto-downgrade `accepted` due to weaker claims
-                    # - never auto-upgrade `needs_review` without human review
-                    if existing_status == "accepted":
-                        new_status = "accepted"
+                    # Human decisions in facts.db are authoritative:
+                    # - accepted facts stay accepted
+                    # - rejected facts stay rejected unless new evidence arrives after the rejection
+                    decision_cutoff = final_decision_cutoff_ts.get(fact_id)
+                    reopen_rejected = (
+                        existing_status == "rejected"
+                        and decision_cutoff is not None
+                        and claim_is_new
+                        and imported_at > float(decision_cutoff)
+                    )
+                    hold_status = existing_status in {"accepted", "rejected"} and not reopen_rejected
+
+                    if hold_status:
+                        new_status = existing_status
                     elif existing_status == "needs_review":
-                        new_status = "needs_review"
+                        # Agent can promote to accepted when confident.
+                        new_status = desired_status
                     else:
                         new_status = desired_status
+
+                    if reopen_rejected:
+                        new_status = "needs_review"
+                        flag_id = _sha256_str(f"{fact_id}\nreopened_after_new_evidence")
+                        cur.execute(
+                            """
+                            INSERT OR IGNORE INTO review_flags(flag_id, fact_id, flag_type, detail, created_at)
+                            VALUES(?, ?, ?, ?, ?)
+                            """,
+                            (
+                                flag_id,
+                                fact_id,
+                                "reopened_after_new_evidence",
+                                f"decided_at={decision_cutoff}, imported_at={imported_at}",
+                                imported_at,
+                            ),
+                        )
+                        if cur.rowcount == 1:
+                            stats.review_flags_inserted += 1
 
                     merged_stability = existing_stability
                     if existing_stability != stability:
                         merged_stability = "transient"
-                        new_status = "needs_review"
                         flag_id = _sha256_str(f"{fact_id}\nstability_change")
                         cur.execute(
                             """
@@ -464,7 +602,7 @@ def merge_claims(
                                 fact_id,
                             ),
                         )
-                        stats.facts_updated += 1
+                    stats.facts_updated += 1
 
                 # Insert evidence + link claim to fact.
                 evidence = claim.get("evidence")
@@ -529,14 +667,52 @@ def merge_claims(
                 if cur.rowcount == 1:
                     stats.fact_claim_links += 1
 
+                if category in LATEST_ONLY_CATEGORIES:
+                    latest_only_seen.add(category)
+
+        # Enforce latest-only semantics for relevant categories in this file.
+        for cat in sorted(latest_only_seen):
+            _enforce_latest_only_category(cur, category=cat)
+
+        # Mark chunk as done in facts.db once this claims file has been applied.
+        if chunk_id is not None:
+            chunk_path = run_dir / "chunks" / f"{chunk_id}.jsonl"
+            chunk_sha256 = _sha256_path(chunk_path) if chunk_path.is_file() else ""
+            claims_objects = stats.claim_objects - before_objects
+            done_at = time.time()
+            note = "empty" if claims_objects == 0 else "ok"
+            cur.execute(
+                """
+                INSERT INTO chunk_progress(
+                  chunk_id, chunk_sha256, claims_path, claims_sha256, claims_objects, done_at, note
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                  chunk_sha256=excluded.chunk_sha256,
+                  claims_path=excluded.claims_path,
+                  claims_sha256=excluded.claims_sha256,
+                  claims_objects=excluded.claims_objects,
+                  done_at=excluded.done_at,
+                  note=excluded.note
+                """,
+                (
+                    chunk_id,
+                    chunk_sha256,
+                    source_path,
+                    claims_sha256,
+                    int(claims_objects),
+                    float(done_at),
+                    note,
+                ),
+            )
+
     # Exclusive category conflict detection (simple heuristic).
     if exclusive_categories:
         for category in exclusive_categories:
             rows = cur.execute(
                 """
-                SELECT fact_id, fact_text, confidence_max
+                SELECT fact_id, fact_text, confidence_max, status
                 FROM facts
-                WHERE category=? AND confidence_max >= ?
+                WHERE category=? AND status IN ('accepted', 'needs_review') AND stability='stable' AND confidence_max >= ?
                 ORDER BY confidence_max DESC, last_seen_ts DESC
                 """,
                 (category, exclusive_conflict_min_conf),
@@ -550,7 +726,7 @@ def merge_claims(
             detail = f"category has {len(rows)} competing stable facts >= {exclusive_conflict_min_conf}: " + " | ".join(
                 fact_summaries[:5]
             )
-            for fact_id, _, _ in rows:
+            for fact_id, _, _, status in rows:
                 imported_at = time.time()
                 flag_id = _sha256_str(f"{fact_id}\nexclusive_conflict\n{exclusive_conflict_min_conf}")
                 cur.execute(
@@ -562,8 +738,6 @@ def merge_claims(
                 )
                 if cur.rowcount == 1:
                     stats.review_flags_inserted += 1
-
-                cur.execute("UPDATE facts SET status='needs_review' WHERE fact_id=?", (fact_id,))
 
 
 def main(argv: list[str]) -> int:
@@ -593,12 +767,6 @@ def main(argv: list[str]) -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Require a successful validation report before merging (default: true).",
-    )
-    parser.add_argument(
-        "--autoaccept-min-confidence",
-        type=float,
-        default=None,
-        help="Auto-accept user-asserted stable facts with confidence >= N (default: disabled).",
     )
     parser.add_argument(
         "--exclusive-category",
@@ -662,9 +830,8 @@ def main(argv: list[str]) -> int:
         exclusive_categories = [
             "identity.name",
             "identity.handle",
-            "identity.email",
-            "identity.phone",
-            "identity.timezone",
+            "identity.role",
+            "identity.company",
         ]
 
     if args.overwrite_db and db_path.exists():
@@ -677,15 +844,20 @@ def main(argv: list[str]) -> int:
         _ensure_schema(conn)
         conn.commit()
 
+        final_decision_cutoff_ts: dict[str, float] = {}
+        if _table_exists(conn, "fact_reviews"):
+            final_decision_cutoff_ts = _load_final_decision_cutoffs(conn)
+
         stats = MergeStats()
         started_at = time.time()
         with conn:
             merge_claims(
                 conn=conn,
+                run_dir=run_dir,
                 claim_paths=claim_paths,
-                autoaccept_min_conf=args.autoaccept_min_confidence,
                 exclusive_categories=exclusive_categories,
                 exclusive_conflict_min_conf=args.exclusive_conflict_min_confidence,
+                final_decision_cutoff_ts=final_decision_cutoff_ts,
                 stats=stats,
             )
 
@@ -701,7 +873,6 @@ def main(argv: list[str]) -> int:
             "db_path": db_path.as_posix(),
             "config": {
                 "require_validation": args.require_validation,
-                "autoaccept_min_confidence": args.autoaccept_min_confidence,
                 "exclusive_categories": exclusive_categories,
                 "exclusive_conflict_min_confidence": args.exclusive_conflict_min_confidence,
             },
