@@ -1,202 +1,103 @@
-# FactWeaver Engineering Design
+# FactWeaver Engineering Design (Agent-First)
 
 Status: Draft  
-Scope: local ChatGPT exports → auditable “about me” knowledge base → deterministic Markdown views
+Scope: local ChatGPT exports → chunked transcript → **agent-distilled** memory claims → `facts.db` → deterministic Markdown views
 
-This document turns `docs/memory-extraction-pipeline.md` into concrete engineering decisions: repo layout, tool interfaces, file formats, and operational safety.
+This document defines the *mechanical* system boundaries. Semantic extraction is performed by an agent; tools exist to make that reliable, resumable, and auditable.
 
-## 1) Goals / non-goals
+## 1) Responsibility boundary
 
-Goals:
-- Extract user-specific “about me” knowledge from `conversations.json` / `shared_conversations.json`.
-- Keep outputs **auditable**: every fact traces back to specific message IDs + timestamps.
-- Keep runs **resumable** and **incremental** (re-run only what changed).
-- Render deterministic, diff-friendly Markdown views for review and editing.
-- Keep the repo safe to publish (no private exports/artifacts committed).
+Agent responsibilities (semantic):
+- Read one `chunks/chunk_*.jsonl` at a time.
+- Decide what is “useful memory” (identity, interests, projects, constraints, major events, plans).
+- Emit claim JSONL to `claims/claims_chunk_*.jsonl`.
+- Default to `status="accepted"`; use `status="needs_review"` when uncertain.
 
-Non-goals:
-- “Perfect truth”. Conflicts/uncertainty are surfaced for review instead of silently resolved.
-- A full UI/search app (initially). This is a local pipeline + Markdown renderer.
-- Uploading raw chat history anywhere by default.
+Tool responsibilities (deterministic):
+- Normalize/export (`messages.jsonl`), redact/trim (`messages_view.jsonl`), chunk (`chunks/`).
+- Validate claim JSONL schema + safety.
+- Merge/dedupe into a canonical SQLite DB (`facts.db`).
+- Track per-chunk progress in `facts.db` so the agent never re-reads completed chunks.
+- Render Markdown views from `facts.db`.
 
-## 2) Safety / privacy baseline
+## 2) Run directory layout (local-only)
 
-Hard rules:
-- Never commit exports (`conversations.json`, `shared_conversations.json`) or generated artifacts (`messages*.jsonl`, `chunks/`, `claims/`, `out/`, `facts.db`, etc.). These stay local and are gitignored.
-- Rendered Markdown should redact secrets by default (tokens, keys, private keys, etc.).
-- “About the user” facts must include at least one **user** quote as evidence; assistant text is context unless user-confirmed.
+All artifacts for a run live under `work/<run-id>/` and are gitignored:
+- Transcript: `messages.jsonl`, `messages_view.jsonl`
+- Chunks: `chunks/chunk_0001.jsonl` … and `chunks/manifest.json`
+- Agent outputs: `claims/claims_chunk_0001.jsonl` …
+- Canonical store: `facts.db`
+- Rendered views: `out/me/*.md`, `out/review.md`
 
-Recommended local checks before pushing:
-- `git status --ignored`
-- `git check-ignore -v conversations.json`
+## 3) Claim schema (contract)
 
-## 3) Repo layout (working + public)
+Each line in `claims/claims_chunk_XXXX.jsonl` is a JSON object with:
+- `category`: string (taxonomy)
+- `fact`: string (atomic, declarative; “about the user”)
+- `stability`: `"stable"` | `"transient"`
+- `status`: `"accepted"` | `"needs_review"` (agent decision; default accepted)
+- `confidence`: number `[0,1]`
+- `time`: `{ "as_of_ts": number }` (newest evidence timestamp)
+- `evidence`: array of `{ role, quote, conv_id, message_id, ts }` (short, verbatim; redact secrets)
+- `derived_from`: `"user"` | `"mixed"` | `"assistant"`
+  - `"mixed"` is allowed for inference (e.g., inferred interest) as long as evidence is present.
 
-### 3.1 Current (bootstrap)
+## 4) Taxonomy (recommended)
 
-Public (committed):
-- `docs/` design docs, prompt templates, output skeletons
-- `tools/` small scripts and wrappers (no secrets)
+Use specific categories so “single-valued” items can be kept latest-only:
+- `identity.name`, `identity.handle`
+- `preferences.workflow.*` (e.g., `preferences.workflow.commit_policy`)
+- `preferences.tools.*` (e.g., `preferences.tools.git`, `preferences.tools.editor`)
+- `preferences.interests.*` (e.g., `preferences.interests.ai_news`)
+- `projects.*` (repo, system, pipeline, stack)
+- `constraints.*` (hard requirements / do-not)
+- `events.major.*` (major life/work events)
+- `goals.transient` (short-term plans)
 
-Local-only (ignored):
-- `conversations.json` / `shared_conversations.json` (or `data/` if you prefer)
-- `messages.jsonl` / `messages_view.jsonl`
-- `chunks/` / `claims/` / `out/`
-- `facts.db` (SQLite canonical store), optional `facts.jsonl` export
+Rule: ignore ephemeral content (e.g., “today’s news”). Store *what it implies about the user* (e.g., repeated interest).
 
-### 3.2 Target structure (before the repo grows)
+Interest rule:
+- an inferred interest should have evidence for **3+ occurrences ever** before being accepted; otherwise keep `needs_review` or defer.
 
-Goal: keep “core logic” reusable, keep “CLI tools” thin, and isolate Windows/agent bridge tooling so it doesn’t contaminate the pipeline design.
+## 5) Canonical DB (`facts.db`)
 
-Recommended layout:
-- `factweaver/` (core Python package)
-  - `io_export/` stream parse exports → linear message list
-  - `normalize/` raw transcript → `messages.jsonl`
-  - `view/` redaction + trimming → `messages_view.jsonl`
-  - `chunk/` token estimation + chunk manifest
-  - `llm/` provider interface, prompt rendering, JSONL validation
-  - `store/` SQLite schema + merge/dedupe + conflicts
-  - `render/` Markdown generation from `facts.db`
-- `tools/` (entrypoints and operational scripts)
-  - `tools/pipeline/` pipeline CLIs (export/view/chunk/extract/merge/render)
-  - `tools/bridge/` WSL→Windows bridge wrappers (git/node/npm/etc.)
-  - `tools/dev/` safety + diagnostics (token counts, ignore checks, doctor)
-- `docs/`
-  - `docs/architecture/` stable architecture + diagrams
-  - `docs/adrs/` decision records (one decision per file)
-  - keep `docs/prompts/` and `docs/output-skeletons/`
+SQLite is the canonical store. It must support:
+- incremental merge/dedupe
+- evidence joins
+- agent decisions (`accepted` vs `needs_review`)
+- per-chunk progress
 
-Compatibility guideline:
-- Keep top-level `tools/win` and `tools/gitw` as stable entrypoints; if we later move implementations into `tools/bridge/`, the top-level scripts should delegate rather than break paths.
+Minimum tables (simplified):
+- `facts` (fact text + category + status + timestamps)
+- `evidence` (quotes keyed to `fact_id`)
+- `claims_raw` (audit log of agent claim lines)
+- `chunk_progress` (chunk_id + chunk_sha + done_at + claims_count + note)
 
-### 3.3 Local artifacts: single run directory
+Latest-only policy:
+- for “single-valued” categories, keep only the newest accepted fact (by evidence timestamp); older accepted facts should be demoted (e.g., marked rejected/superseded) rather than kept as competing truths.
 
-To reduce “oops I staged the wrong file”, prefer a single ignored run root (e.g., `work/`):
-- `work/<run-id>/messages.jsonl`
-- `work/<run-id>/messages_view.jsonl`
-- `work/<run-id>/chunks/` (+ `manifest.json`)
-- `work/<run-id>/claims/`
-- `work/<run-id>/facts.db`
-- `work/<run-id>/out/`
+## 6) Rendering
 
-This keeps reruns and comparisons easy (multiple runs can coexist) and makes ignore rules simpler.
+Rendering produces:
+- `out/me/*.md`: accepted-only, grouped by category prefix.
+- `out/review.md`: `needs_review` items and any auto-flags.
 
-## 4) Architecture overview
+Rendering must be deterministic (stable ordering) for diff-friendly review.
 
-We do not LLM-process raw export JSON. We normalize first into a compact transcript log, then chunk.
+## 7) Operational safety
 
-```mermaid
-flowchart LR
-  A["conversations.json"] -->|stream parse| B["messages.jsonl\n(raw, verbatim)"]
-  B -->|filter + redact| C["messages_view.jsonl\n(LLM view)"]
-  C -->|token-aware chunk| D["chunks/\nchunk_0001.jsonl ...\n+ manifest.json"]
-  D -->|LLM map| E["claims/\nclaims_0001.jsonl ..."]
-  E -->|merge/dedupe| F["facts.db (sqlite)\n+ optional facts.jsonl"]
-  F -->|render| G["out/me/*.md\n+ out/review.md"]
-```
+- No exports or artifacts are committed (enforced by `.gitignore` + `tools/dev/doctor.py`).
+- `messages_view.jsonl` performs redaction/trimming; outputs must not contain secrets.
+- Validation must fail on secret-like strings in quotes/facts.
 
-## 5) Canonical records and file formats
+## 8) CLI surface
 
-### 5.1 `messages.jsonl` (raw transcript)
-One line per message (verbatim text for evidence):
-```json
-{"conv_id":"...","title":"...","ts":1768287751.0,"role":"user","message_id":"...","text":"..."}
-```
-
-Constraints:
-- Ordering must be deterministic per conversation.
-- Preserve IDs + timestamps; these are the provenance keys.
-
-### 5.2 `messages_view.jsonl` (LLM-efficient view)
-Same schema as `messages.jsonl`, but with:
-- optional trimming (e.g., huge pasted logs) and stable elision markers
-- redaction applied for credentials/secrets (minimum viable patterns first)
-
-### 5.3 `chunks/manifest.json`
-Chunk metadata for resumability and incremental reruns:
-- chunk ID, hash, included message IDs, token estimate, created timestamp, processing status
-
-### 5.4 `claims/*.jsonl` (LLM map output)
-One line per claim (atomic fact + evidence). Use `docs/prompts/claims-map-template.md` as the contract.
-
-Key invariants:
-- “About the user” claims require at least one user evidence quote.
-- Assistant-derived hypotheses must be explicitly tagged and low confidence.
-
-### 5.5 `facts.db` (SQLite canonical store)
-SQLite is the canonical store for dedupe + conflicts + evidence joins.
-
-Minimum tables (subject to iteration):
-- `claims_raw(chunk_id TEXT, claim_json TEXT, inserted_at REAL)`
-- `facts(fact_id TEXT PRIMARY KEY, category TEXT, fact_text TEXT, stability TEXT, first_seen_ts REAL, last_seen_ts REAL, confidence_max REAL, status TEXT)`
-- `evidence(fact_id TEXT, conv_id TEXT, message_id TEXT, ts REAL, role TEXT, quote TEXT, quote_hash TEXT)`
-- `review_flags(fact_id TEXT, flag_type TEXT, detail TEXT)` (auto-detected “needs review” signals)
-- `fact_reviews(fact_id TEXT, action TEXT, previous_status TEXT, new_status TEXT, reason TEXT, decided_at REAL)` (human audit log)
-
-Fact identity:
-- `fact_id = sha256(category + \"\\n\" + normalized_fact_text)` (normalize by trimming + collapsing whitespace; keep deterministic).
-
-## 6) Tooling: planned “main tools” (CLI surface)
-
-The pipeline is intentionally decomposed into small, composable tools. The design targets idempotent steps with explicit inputs/outputs.
-
-Planned scripts (Phase 1–3), as thin CLIs over `factweaver/*`:
-- `tools/pipeline/export_messages.py`: export → `messages.jsonl`
-- `tools/pipeline/build_view.py`: `messages.jsonl` → `messages_view.jsonl` (redaction + trimming)
-- `tools/pipeline/chunk_messages.py`: `messages_view.jsonl` → `chunks/` (+ manifest)
-- `tools/pipeline/extract_claims.py`: `chunks/` → `claims/` (LLM map; provider/driver abstracted)
-- `tools/pipeline/merge_claims.py`: `claims/` → `facts.db` (dedupe + conflicts + evidence)
-- `tools/pipeline/render_md.py`: `facts.db` → `out/me/*.md` + `out/review.md`
-- `tools/pipeline/curate_facts.py`: apply human accept/reject decisions to `facts.db` (audit log), then rerender
-
-Existing:
-- `tools/count_tokens.py`: token counts for large inputs using `tiktoken` (likely moves to `tools/dev/` later)
-
-CLI conventions (recommendation):
-- Explicit input/output paths (no implicit CWD “magic”).
-- A `--run-dir work/<run-id>` option that controls where artifacts are written.
-- Atomic writes for outputs (write temp → rename) + per-step manifests/hashes.
-
-Design principle:
-- Each tool writes outputs atomically (temp file → rename) and records a manifest/hash so reruns skip unchanged units.
-
-## 7) Windows/WSL bridging strategy (agent-friendly)
-
-We’ll keep a clean separation:
-- Pipeline data artifacts are OS-agnostic files (JSONL, SQLite, Markdown).
-- When we need to rely on a **Windows** toolchain (credentials, system-installed tooling), we run it through a wrapper.
-
-Current pattern (already in repo):
-- `tools/win` runs a command in Windows PowerShell from the repo root.
-- `tools/gitw` is a convenience wrapper: `bash tools/gitw <git args...>`.
-
-Future expansion (when needed):
-- Group wrappers under `tools/bridge/` (e.g., `nodew`, `npmw`, `dockerw`) while keeping `tools/win`/`tools/gitw` as stable entrypoints.
-- Keep wrapper behavior explicit: set repo root, pass args through verbatim, and exit with child status.
-- Add a `tools/dev/doctor` preflight to validate required tooling/auth before long jobs (and to keep failures fast).
-
-## 8) Milestones (implementation order)
-
-Phase 1 (data plane):
-- Export + normalize messages deterministically
-- Build view + redaction
-- Token-aware chunking + manifest
-
-Phase 2 (extraction plane):
-- Claim extraction per chunk (LLM map)
-- Merge/dedupe into SQLite + conflict surfacing
-
-Phase 3 (presentation):
-- Render deterministic Markdown views + review queue
-
-Phase 4 (hardening):
-- Better redaction, better heuristics for chunking, and tighter provenance tooling.
-
-## 9) Open decisions (explicitly tracked)
-
-- Tokenizer alignment: `tiktoken` `o200k_base` with margin vs exact model tokenizer.
-- LLM provider interface: which model(s), how to store run metadata, and retry semantics.
-- Redaction scope: redact in Markdown only vs also in the canonical store.
-- Review workflow: auto-accept high-confidence user-asserted facts vs manual approval gate.
-- Artifact layout: single `work/<run-id>` directory vs root-level artifact files.
-- Execution mode: agent/manual (prompt-in/paste-out) vs API-driven automation.
+Core pipeline entrypoints:
+- `tools/pipeline/export_messages.py`
+- `tools/pipeline/build_view.py`
+- `tools/pipeline/chunk_messages.py`
+- `tools/pipeline/pack_claim_prompts.py` (agent helper)
+- `tools/pipeline/validate_claims.py`
+- `tools/pipeline/merge_claims.py`
+- `tools/pipeline/render_md.py`
+- `tools/pipeline/status.py` (agent-friendly progress summary)

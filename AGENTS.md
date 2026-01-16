@@ -1,41 +1,49 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+FactWeaver is an **agent-in-the-loop** pipeline: tools manage artifacts; the agent performs semantic extraction.
 
-- `docs/`: architecture/design docs, prompt templates, and Markdown output skeletons.
-- `tools/`: small scripts and wrappers (kept dependency-light).
-  - `tools/count_tokens.py`: token counter for large exports.
-  - `tools/win`, `tools/gitw`: WSL → Windows command wrappers (useful when the repo lives under `/mnt/c/...`).
-- Local-only artifacts (gitignored): `conversations.json`, `shared_conversations.json`, `messages*.jsonl`, `chunks/`, `claims/`, `out/`, `facts.db`, `work/`.
+## Project Structure
 
-## Build, Test, and Development Commands
+- `docs/`: pipeline + engineering design docs, prompt templates, output skeletons.
+- `tools/pipeline/`: deterministic CLIs (export, view, chunk, validate, merge, render, status).
+- `tools/dev/`: safety/diagnostics (e.g., `doctor.py`).
+- Local-only artifacts (gitignored): `conversations.json`, `shared_conversations.json`, `work/`, `facts.db`, `chunks/`, `claims/`, `out/`.
 
-- Token counting (requires `tiktoken`):
-  - `python3 -m venv .venv && .venv/bin/python -m pip install -U pip tiktoken`
-  - `.venv/bin/python tools/count_tokens.py conversations.json`
-- Windows toolchain from WSL:
-  - `bash tools/win <command> [args...]` (runs in Windows PowerShell from repo root)
-  - `bash tools/gitw status` / `bash tools/gitw push`
+## Development Commands
 
-## Coding Style & Naming Conventions
+Typical run (agent-first):
+- `python3 tools/pipeline/export_messages.py --input conversations.json --run-dir work/<run-id>`
+- `python3 tools/pipeline/build_view.py --run-dir work/<run-id>`
+- `python3 tools/pipeline/chunk_messages.py --run-dir work/<run-id>`
+- `python3 tools/pipeline/pack_claim_prompts.py --run-dir work/<run-id>`
+- Agent reads `chunks/chunk_*.jsonl` and writes `claims/claims_chunk_*.jsonl` (empty file allowed).
+- `python3 tools/pipeline/validate_claims.py --run-dir work/<run-id> --overwrite-report`
+- `python3 tools/pipeline/merge_claims.py --run-dir work/<run-id>`
+- `python3 tools/pipeline/render_md.py --run-dir work/<run-id> --overwrite`
+- `python3 tools/pipeline/status.py --run-dir work/<run-id>`
 
-- Python: 4-space indentation, PEP 8 naming (`snake_case` for files/functions, `PascalCase` for classes).
-- Prefer type hints and small, composable functions. Avoid “magic” defaults; make I/O paths explicit.
-- Determinism matters: stable ordering and stable hashing for manifests/IDs.
+Safety preflight:
+- `python3 tools/dev/doctor.py --verbose`
 
-## Testing Guidelines
+## Coding Style
 
-- No test suite is established yet. If you add one, use `pytest` and place tests under `tests/` with `test_*.py`.
-- Add tests for parsing/normalization, redaction, chunking boundaries, and SQLite merge/dedupe behavior.
+- Python: 4-space indentation, PEP 8 naming.
+- Prefer type hints and small, composable functions. Keep I/O explicit (no hidden globals).
+- Keep outputs deterministic (stable ordering + stable hashing for manifests/IDs).
 
-## Commit & Pull Request Guidelines
+## Testing
 
-- Commit messages in history are short and imperative (e.g., “Initial commit”); follow that style.
-- Before opening a PR, verify no personal data is staged:
+- No test suite yet. If adding tests, use `pytest` under `tests/` (`test_*.py`).
+- Prioritize tests for: JSONL parsing, redaction, chunk boundaries, merge/dedupe, and progress tracking.
+
+## Commits & PRs
+
+- Do not commit exports or run artifacts. Verify before pushing:
   - `git status --ignored`
   - `git check-ignore -v conversations.json`
-- PRs should include: what changed, how to run it locally, and any new artifact paths added to `.gitignore`.
+- PRs should describe: what changed, how to run locally, and any updates to `.gitignore`.
 
-## Security & Privacy Notes
+## Security & Privacy
 
-- Never commit raw exports or generated artifacts. If secrets are ever committed, treat them as compromised and rotate/remove from history.
+- Assume all exports contain sensitive material. Redact in `messages_view.jsonl` and keep evidence quotes short.
+- If secrets ever land in git history, treat them as compromised and rotate/remove from history.
