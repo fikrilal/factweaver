@@ -22,8 +22,17 @@ Tools enforce safety:
   - use `needs_review` when you are not confident or evidence is insufficient
 - `derived_from`:
   - `user` when directly stated by the user
-  - `mixed` when inferred from user behavior with evidence
-  - `assistant` only when it is the assistant’s suggestion (must be `needs_review`)
+  - `mixed` when inferred from user behavior with evidence, or when the user approves an assistant proposal
+  - `assistant` when the content is primarily from the assistant (must be `needs_review`)
+
+## Assistant messages (do not ignore)
+
+The assistant often contains the *detailed* plan/architecture while the user provides prompts and approvals.
+
+Policy:
+- Extract durable project/workflow decisions from assistant text as candidate claims.
+- If not user-confirmed: `derived_from="assistant"` + `status="needs_review"`.
+- If user explicitly approves/commits: `derived_from="mixed"` and include both quotes (proposal + approval) so it can be `accepted`.
 
 ## Interests (option B)
 
@@ -37,4 +46,3 @@ These categories should have only one current accepted value:
 - `identity.name`, `identity.handle`, `identity.role`, `identity.company`
 
 The merge step will mark older competing items as `superseded`, but the agent should still prefer the newest evidence.
-

@@ -62,6 +62,9 @@ The agent writes JSONL where each line is one claim object (see `docs/prompts/cl
 Key rules:
 - Facts are **about the user**, not about ephemeral content.
   - Example: “Asked about AI news repeatedly” ⇒ “Interested in AI world” (keep this), but do not store the news itself.
+- Do not ignore assistant messages: assistant replies often contain the detailed project plan/architecture.
+  - If not user-confirmed, record as `derived_from="assistant"` + `status="needs_review"`.
+  - If user explicitly approves/commits, record as `derived_from="mixed"` with both quotes, and it can be `accepted`.
 - “Interests” can be inferred from behavior if there is evidence.
   - Interest threshold: **3+ occurrences ever**. Before threshold, keep `status="needs_review"` or defer.
 - Major events only; skip minor day-to-day mood statements unless they recur as a stable pattern.
