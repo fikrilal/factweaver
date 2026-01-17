@@ -31,6 +31,11 @@ Extraction scope:
 - Only durable “about the user” memory: identity, preferences, interests, projects, constraints, major events, and meaningful plans.
 - Skip ephemeral content (e.g., today’s news). Keep what it implies about the user (e.g., recurring interest).
 
+Assistant messages (important):
+- Do not ignore assistant responses: they often contain the detailed plan/architecture while the user provides prompts and approvals.
+- If a claim is primarily from the assistant and not explicitly confirmed by the user, emit it as `derived_from="assistant"` + `status="needs_review"`.
+- If the user explicitly approves/commits to the assistant proposal, emit as `derived_from="mixed"` and include both quotes (proposal + approval) so it can be `accepted`.
+
 Policies:
 - Interests use option B: `category="preferences.interests"` with `value="<interest label>"`.
   - `accepted` interests require evidence for **3+ distinct user occurrences** (different `message_id`s); otherwise use `needs_review`.
